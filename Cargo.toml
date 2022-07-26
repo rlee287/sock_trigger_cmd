@@ -13,3 +13,5 @@ log = "0.4"
 simplelog = {version = "0.12", default-features = false}
 
 ctrlc = "3.2"
+
+shlex = "1.1.0"
