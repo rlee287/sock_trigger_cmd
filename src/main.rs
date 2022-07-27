@@ -2,111 +2,54 @@
 use std::env::args_os;
 
 use std::fs;
+use std::path::PathBuf;
 use std::io::{Read, ErrorKind};
 #[cfg(target_family = "unix")]
-use std::os::unix::fs::FileTypeExt;
+use std::os::unix::net::{UnixListener, UnixStream};
 
 use std::collections::HashMap;
 
-use std::sync::atomic::{Ordering, AtomicBool};
+use crossbeam_utils::thread;
 
-use log::{info, warn, error, log, Level, LevelFilter};
+use log::{debug, info, warn, error, log, Level, LevelFilter};
 use simplelog::{WriteLogger, CombinedLogger, SimpleLogger};
 
 mod util;
 use util::NonEmptyNoNullString;
-
-static PROCESS_INPUT: AtomicBool = AtomicBool::new(true);
 
 #[cfg(debug_assertions)]
 const LOG_LEVEL: LevelFilter = LevelFilter::Debug;
 #[cfg(not(debug_assertions))]
 const LOG_LEVEL: LevelFilter = LevelFilter::Info;
 
-fn graceful_stop() {
-    info!("Received Ctrl-C, stopping");
-    PROCESS_INPUT.store(false, Ordering::Release);
-}
-
-fn main() -> Result<(), String> {
-    let run_result = run();
-    if let Err(ref e) = run_result {
-        error!("{}", e);
-    }
-    run_result
-}
-fn run() -> Result<(), String> {
-    let args: Vec<_> = args_os().collect();
-    if args.len() != 3 {
-        eprintln!("Usage: fifo_or_socket input_pipe config");
-        return Err(String::new());
-    }
-
-    let log_file = fs::OpenOptions::new().create(true).append(true)
-        .open("./fifo_trigger_cmd.log")
-        .map_err(|e| format!("Could not open log file: {}", e))?;
-    CombinedLogger::init(vec![
-        WriteLogger::new(LOG_LEVEL, simplelog::Config::default(), log_file),
-        SimpleLogger::new(LOG_LEVEL, simplelog::Config::default())
-    ]).map_err(|e| format!("Could not init logging: {}", e))?;
-
-    info!("Loading configuration file");
-    let config_bytes = match fs::read(&args[2]) {
-        Ok(val) => val,
-        Err(e) => return Err(format!("Unable to read config: {}", e))
-    };
-    let config: HashMap<NonEmptyNoNullString, String> = serde_json::from_slice(&config_bytes).map_err(|e| format!("Config file must map string to string: {}", e))?;
-    drop(config_bytes);
-
-    if config.is_empty() {
-        return Err("Config has no entries".to_owned());
-    }
+fn handle_connection(config: &HashMap<NonEmptyNoNullString, String>, stream: UnixStream) {
+    debug!("Thread spawned for new connection");
     let max_key_len = config.keys().map(|s| s.as_ref().len()).max().unwrap();
 
-    info!("Opening fifo_or_socket");
-    // TODO: allow for a regular TCP socket read as well
-    let fifo_or_socket = fs::File::open(&args[1])
-        .map_err(|e| format!("Could not open fifo_or_socket: {}", e))?;
+    let mut socket_bytes = stream.bytes();
 
-    let fifo_or_socket_type = fifo_or_socket.metadata().unwrap().file_type();
-    if !(fifo_or_socket_type.is_fifo() || fifo_or_socket_type.is_socket()) {
-        return Err("fifo_or_socket must be fifo or socket".to_owned());
-    }
-    let mut fifo_or_socket_bytes = fifo_or_socket.bytes();
-
-    ctrlc::set_handler(|| graceful_stop()).unwrap();
-
-    info!("Starting processing loop");
-    'cmd_loop: while PROCESS_INPUT.load(Ordering::Acquire) {
+    'cmd_loop: loop {
         let mut key_vec: Vec<u8> = Vec::with_capacity(max_key_len);
         while key_vec.len() <= max_key_len {
-            let next_byte: Option<u8> = match fifo_or_socket_bytes.next() {
-                Some(Ok(b)) => Some(b),
+            let next_byte = match socket_bytes.next() {
+                Some(Ok(b)) => b,
                 Some(Err(e)) => {
                     if e.kind() == ErrorKind::Interrupted {
                         continue;
                     }
-                    error!("Could not read from fifo_or_socket: {}", e);
+                    error!("Could not read from socket: {}", e);
                     // Go ahead and wipe the buffer
                     continue 'cmd_loop;
                 }
                 None => {
-                    // FIFO returns EOF when write end is closed
-                    // Write end closed -> discard the buffer
-                    key_vec.clear();
-                    std::thread::sleep(std::time::Duration::from_millis(100));
-                    None
-                    //PROCESS_INPUT.store(false, Ordering::Release);
-                    //break;
+                    break 'cmd_loop;
                 }
             };
-            if let Some(next_byte) = next_byte {
-                // Null byte scanning works because UTF-8 does not have nulls
-                if next_byte == b'\x00' {
-                    break;
-                }
-                key_vec.push(next_byte);
+            // Null byte scanning works because UTF-8 does not have nulls
+            if next_byte == b'\x00' {
+                break;
             }
+            key_vec.push(next_byte);
         }
         let key_str = match std::str::from_utf8(&key_vec) {
             Ok(s) => s,
@@ -148,6 +91,71 @@ fn run() -> Result<(), String> {
             }
         }
     }
+    debug!("Thread exiting")
+}
+
+fn main() -> Result<(), String> {
+    let run_result = run();
+    if let Err(ref e) = run_result {
+        error!("{}", e);
+    }
+    run_result
+}
+fn run() -> Result<(), String> {
+    let args: Vec<_> = args_os().collect();
+    if args.len() != 3 {
+        eprintln!("Usage: sock_trigger_cmd socket_loc config");
+        return Err(String::new());
+    }
+
+    let log_file = fs::OpenOptions::new().create(true).append(true)
+        .open("./fifo_trigger_cmd.log")
+        .map_err(|e| format!("Could not open log file: {}", e))?;
+    CombinedLogger::init(vec![
+        WriteLogger::new(LOG_LEVEL, simplelog::Config::default(), log_file),
+        SimpleLogger::new(LOG_LEVEL, simplelog::Config::default())
+    ]).map_err(|e| format!("Could not init logging: {}", e))?;
+
+    info!("Loading configuration file");
+    let config_bytes = match fs::read(&args[2]) {
+        Ok(val) => val,
+        Err(e) => return Err(format!("Unable to read config: {}", e))
+    };
+    let config: HashMap<NonEmptyNoNullString, String> = serde_json::from_slice(&config_bytes).map_err(|e| format!("Config file must map string to string: {}", e))?;
+    drop(config_bytes);
+
+    if config.is_empty() {
+        return Err("Config has no entries".to_owned());
+    }
+
+    debug!("Removing old file if it exists");
+    let path = PathBuf::from(&args[1]);
+    if path.exists() {
+        if path.is_file() && path.metadata().unwrap().len() > 0 {
+            return Err("Refusing to remove nonempty file at socket path".to_owned());
+        }
+        fs::remove_file(path).unwrap();
+    }
+
+    info!("Opening socket");
+    // TODO: allow for a regular TCP socket read as well
+    let socket = UnixListener::bind(&args[1])
+        .map_err(|e| format!("Could not open socket: {}", e))?;
+
+    info!("Starting processing loop");
+    thread::scope(|t| {
+        for conn_result in socket.incoming() {
+            match conn_result {
+                Ok(conn) => {
+                    t.spawn(|_| handle_connection(&config, conn));
+                },
+                Err(e) => {
+                    debug!("Error with receiving connection: {}", e);
+                    break;
+                }
+            }
+        }
+    }).unwrap();
 
     Ok(())
 }
