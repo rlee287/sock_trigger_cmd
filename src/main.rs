@@ -18,9 +18,9 @@ mod util;
 use util::NonEmptyNoNullString;
 
 #[cfg(debug_assertions)]
-const LOG_LEVEL: LevelFilter = LevelFilter::Debug;
+const PRINT_LOG_LEVEL: LevelFilter = LevelFilter::Debug;
 #[cfg(not(debug_assertions))]
-const LOG_LEVEL: LevelFilter = LevelFilter::Info;
+const PRINT_LOG_LEVEL: LevelFilter = LevelFilter::Info;
 
 fn handle_connection(config: &HashMap<NonEmptyNoNullString, String>, stream: UnixStream) {
     debug!("Thread spawned for new connection");
@@ -126,11 +126,11 @@ fn run() -> Result<(), String> {
     }
 
     let log_file = fs::OpenOptions::new().create(true).append(true)
-        .open("./fifo_trigger_cmd.log")
+        .open("./sock_trigger_cmd.log")
         .map_err(|e| format!("Could not open log file: {}", e))?;
     CombinedLogger::init(vec![
-        WriteLogger::new(LOG_LEVEL, simplelog::Config::default(), log_file),
-        SimpleLogger::new(LOG_LEVEL, simplelog::Config::default())
+        WriteLogger::new(LevelFilter::Debug, simplelog::Config::default(), log_file),
+        SimpleLogger::new(PRINT_LOG_LEVEL, simplelog::Config::default())
     ]).map_err(|e| format!("Could not init logging: {}", e))?;
 
     info!("Loading configuration file");
