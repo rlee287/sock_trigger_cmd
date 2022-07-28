@@ -3,7 +3,7 @@ use std::env::args_os;
 
 use std::fs;
 use std::path::PathBuf;
-use std::io::{Read, ErrorKind};
+use std::io::{Read, Write, ErrorKind};
 #[cfg(target_family = "unix")]
 use std::os::unix::net::{UnixListener, UnixStream};
 
@@ -25,8 +25,7 @@ const LOG_LEVEL: LevelFilter = LevelFilter::Info;
 fn handle_connection(config: &HashMap<NonEmptyNoNullString, String>, stream: UnixStream) {
     debug!("Thread spawned for new connection");
     let max_key_len = config.keys().map(|s| s.as_ref().len()).max().unwrap();
-
-    let mut socket_bytes = stream.bytes();
+    let mut socket_bytes = (&stream).bytes();
 
     'cmd_loop: loop {
         let mut key_vec: Vec<u8> = Vec::with_capacity(max_key_len);
@@ -55,7 +54,10 @@ fn handle_connection(config: &HashMap<NonEmptyNoNullString, String>, stream: Uni
             Ok(s) => s,
             Err(_) => {
                 // Wouldn't match our keys anyways
-                error!("Received non-matching key with invalid utf8 {}", String::from_utf8_lossy(&key_vec));
+                warn!("Received non-matching key with invalid utf8 {}", String::from_utf8_lossy(&key_vec));
+                if let Err(e) = (&stream).write_all(b"X") {
+                    error!("Could not write to socket: {}", e);
+                }
                 continue;
             }
         };
@@ -64,16 +66,25 @@ fn handle_connection(config: &HashMap<NonEmptyNoNullString, String>, stream: Uni
                 match util::run_cmd(cmd) {
                     Ok(output) => {
                         let log_output_level = match output.status.code() {
-                            Some(0) => {
-                                info!("Command {} exited with code 0", cmd);
-                                Level::Debug
-                            },
-                            Some(e) => {
-                                warn!("Command {} exited with code {}", cmd, e);
-                                Level::Warn
+                            Some(exit_code) => {
+                                let finish_level = match exit_code {
+                                    0 => Level::Info,
+                                    _ => Level::Warn
+                                };
+                                log!(finish_level, "Command {} exited with code {}", cmd, exit_code);
+                                if let Err(e) = (&stream).write_all(&[b'C', (exit_code%256) as u8]) {
+                                    error!("Could not write to socket: {}", e);
+                                }
+                                match exit_code {
+                                    0 => Level::Debug,
+                                    _ => Level::Warn
+                                }
                             },
                             None => {
                                 warn!("Command {} terminated by signal", cmd);
+                                if let Err(e) = (&stream).write_all(b"S") {
+                                    error!("Could not write to socket: {}", e);
+                                }
                                 Level::Warn
                             }
                         };
@@ -82,11 +93,17 @@ fn handle_connection(config: &HashMap<NonEmptyNoNullString, String>, stream: Uni
                     },
                     Err(e) => {
                         error!("Error starting command: {}", e);
+                        if let Err(e) = (&stream).write_all(b"F") {
+                            error!("Could not write to socket: {}", e);
+                        }
                     }
                 }
             },
             None => {
                 warn!("Received non-matching key {}", key_str);
+                if let Err(e) = (&stream).write_all(b"X") {
+                    error!("Could not write to socket: {}", e);
+                }
                 continue;
             }
         }
@@ -128,7 +145,7 @@ fn run() -> Result<(), String> {
         return Err("Config has no entries".to_owned());
     }
 
-    debug!("Removing old file if it exists");
+    debug!("Removing old socket file if it exists");
     let path = PathBuf::from(&args[1]);
     if path.exists() {
         if path.is_file() && path.metadata().unwrap().len() > 0 {
