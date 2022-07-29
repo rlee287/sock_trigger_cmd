@@ -12,15 +12,12 @@ use std::collections::HashMap;
 use crossbeam_utils::thread;
 
 use log::{debug, info, warn, error, log, Level, LevelFilter};
-use simplelog::{WriteLogger, CombinedLogger, SimpleLogger};
+use flexi_logger::{Logger, FileSpec};
+use flexi_logger::writers::{Syslog, SyslogWriter};
+//use simplelog::{WriteLogger, CombinedLogger, SimpleLogger};
 
 mod util;
 use util::NonEmptyNoNullString;
-
-#[cfg(debug_assertions)]
-const PRINT_LOG_LEVEL: LevelFilter = LevelFilter::Debug;
-#[cfg(not(debug_assertions))]
-const PRINT_LOG_LEVEL: LevelFilter = LevelFilter::Info;
 
 fn handle_connection(config: &HashMap<NonEmptyNoNullString, String>, stream: UnixStream) {
     debug!("Thread spawned for new connection");
@@ -125,13 +122,28 @@ fn run() -> Result<(), String> {
         return Err(String::new());
     }
 
-    let log_file = fs::OpenOptions::new().create(true).append(true)
+    /*let log_file = fs::OpenOptions::new().create(true).append(true)
         .open("./sock_trigger_cmd.log")
-        .map_err(|e| format!("Could not open log file: {}", e))?;
-    CombinedLogger::init(vec![
-        WriteLogger::new(LevelFilter::Debug, simplelog::Config::default(), log_file),
-        SimpleLogger::new(PRINT_LOG_LEVEL, simplelog::Config::default())
-    ]).map_err(|e| format!("Could not init logging: {}", e))?;
+        .map_err(|e| format!("Could not open log file: {}", e))?;*/
+    let log_path = match nix::unistd::Uid::effective().is_root() {
+        true => "/var/log/sock_trigger_cmd.log".to_owned(),
+        false => std::env::var("HOME").unwrap()+"/sock_trigger_cmd.log"
+    };
+    let _logger = Logger::try_with_env_or_str("debug")
+        .map_err(|e| format!("Could not initialize logging: {}", e))?
+        .o_append(true)
+        .log_to_file_and_writer(FileSpec::try_from(log_path).unwrap(),
+            SyslogWriter::try_new(flexi_logger::writers::SyslogFacility::SystemDaemons,
+                None, LevelFilter::Info,
+                "sock_trigger_cmd".to_owned(),
+                Syslog::try_datagram("/dev/log").unwrap()
+            ).unwrap()
+        )
+        .duplicate_to_stdout(flexi_logger::Duplicate::Info)
+        .format_for_files(flexi_logger::opt_format)
+        .format_for_stdout(flexi_logger::opt_format)
+        .start()
+        .map_err(|e| format!("Could not initialize logging: {}", e))?;
 
     info!("Loading configuration file");
     let config_bytes = match fs::read(&args[2]) {
