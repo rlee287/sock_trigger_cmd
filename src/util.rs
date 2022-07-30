@@ -3,6 +3,7 @@ use std::error::Error;
 use std::borrow::Borrow;
 
 use std::process::{Command, Output};
+use std::ffi::{OsStr, OsString};
 
 #[derive(Deserialize)]
 #[serde(try_from = "String")]
@@ -82,15 +83,22 @@ pub fn run_cmd(cmd: &str) -> Result<Output, RunCmdError> {
 
     let first_non_env_index = cmd_args.iter()
         .position(|s| !s.contains('=')).unwrap_or(0);
-    let env_map = cmd_args[..first_non_env_index].iter()
+    let parsed_env_map = cmd_args[..first_non_env_index].iter()
         .map(|s| {
             let eq_pos = s.find('=').unwrap();
             (&s[..eq_pos], &s[eq_pos+1..])
+        })
+        .map(|(s1, s2)| (OsStr::new(s1), OsString::from(s2)));
+    // Preserve $HOME, $PATH, $USER, and $SHELL if they exist
+    let preserved_env_map = ["HOME", "PATH", "USER", "SHELL"].iter()
+        .filter_map(|s| {
+            std::env::var_os(s).map(|env_var| (OsStr::new(s), env_var))
         });
+
     let cmd_obj = Command::new(&cmd_args[first_non_env_index])
         .args(&cmd_args[first_non_env_index+1..])
         .env_clear()
-        .envs(env_map)
+        .envs(parsed_env_map.chain(preserved_env_map))
         // Default of output() is null stdin and piped stdout
         .output();
     cmd_obj.map_err(|e| RunCmdError::CmdSpawnFailure(e))
