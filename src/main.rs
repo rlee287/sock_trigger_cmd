@@ -4,7 +4,6 @@ use std::env::args_os;
 use std::fs;
 use std::path::PathBuf;
 use std::io::{Read, Write, ErrorKind};
-#[cfg(target_family = "unix")]
 use std::os::unix::net::{UnixListener, UnixStream};
 
 use std::collections::HashMap;
@@ -14,7 +13,6 @@ use crossbeam_utils::thread;
 use log::{debug, info, warn, error, log, Level, LevelFilter};
 use flexi_logger::{Logger, FileSpec};
 use flexi_logger::writers::{Syslog, SyslogWriter};
-//use simplelog::{WriteLogger, CombinedLogger, SimpleLogger};
 
 mod util;
 use util::NonEmptyNoNullString;
@@ -118,13 +116,9 @@ fn main() -> Result<(), String> {
 fn run() -> Result<(), String> {
     let args: Vec<_> = args_os().collect();
     if args.len() != 3 {
-        eprintln!("Usage: sock_trigger_cmd socket_loc config");
-        return Err(String::new());
+        return Err("Usage: sock_trigger_cmd socket_loc config".to_owned());
     }
 
-    /*let log_file = fs::OpenOptions::new().create(true).append(true)
-        .open("./sock_trigger_cmd.log")
-        .map_err(|e| format!("Could not open log file: {}", e))?;*/
     let log_path = match nix::unistd::Uid::effective().is_root() {
         true => "/var/log/sock_trigger_cmd.log".to_owned(),
         false => std::env::var("HOME").unwrap()+"/sock_trigger_cmd.log"
