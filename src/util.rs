@@ -89,8 +89,8 @@ pub fn run_cmd(cmd: &str) -> Result<Output, RunCmdError> {
             (&s[..eq_pos], &s[eq_pos+1..])
         })
         .map(|(s1, s2)| (OsStr::new(s1), OsString::from(s2)));
-    // Preserve $HOME, $PATH, $USER, and $SHELL if they exist
-    let preserved_env_map = ["HOME", "PATH", "USER", "SHELL"].iter()
+    // Preserve $HOME, $PATH, $USER, $SHELL, and $TERM if they exist
+    let preserved_env_map = ["HOME", "PATH", "USER", "SHELL", "TERM"].iter()
         .filter_map(|s| {
             std::env::var_os(s).map(|env_var| (OsStr::new(s), env_var))
         });
