@@ -6,6 +6,9 @@ use std::path::PathBuf;
 use std::io::{Read, Write, ErrorKind};
 use std::os::unix::net::{UnixListener, UnixStream};
 
+use nix::unistd::Uid;
+use nix::sys::stat::{fchmodat, Mode, FchmodatFlags};
+
 use std::collections::HashMap;
 
 use crossbeam_utils::thread;
@@ -119,7 +122,7 @@ fn run() -> Result<(), String> {
         return Err("Usage: sock_trigger_cmd socket_loc config".to_owned());
     }
 
-    let log_path = match nix::unistd::Uid::effective().is_root() {
+    let log_path = match Uid::effective().is_root() {
         true => "/var/log/sock_trigger_cmd.log".to_owned(),
         false => std::env::var("HOME").unwrap()+"/sock_trigger_cmd.log"
     };
@@ -164,6 +167,8 @@ fn run() -> Result<(), String> {
     // TODO: allow for a regular TCP socket read as well
     let socket = UnixListener::bind(&args[1])
         .map_err(|e| format!("Could not open socket: {}", e))?;
+    fchmodat(None, args[1].as_os_str(), Mode::from_bits(0o660).unwrap(), FchmodatFlags::FollowSymlink)
+        .map_err(|e| format!("Could not set socket permissions: {}", e))?;
 
     info!("Starting processing loop");
     thread::scope(|t| {
