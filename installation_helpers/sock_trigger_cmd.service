@@ -1,0 +1,13 @@
+[Unit]
+Description=Daemon that reads keys from a unix socket and executes commmands according to a config file
+
+[Service]
+Type=simple
+Restart=always
+User=root
+Group=sock-trigger-cmd
+ExecStart=/path/to/sock_trigger_cmd /run/sock_trigger_cmd.sock /etc/sock_trigger_cmd.conf
+ExecStartPost=/usr/bin/chmod 660 /run/sock_trigger_cmd.sock
+
+[Install]
+WantedBy=multi-user.target
