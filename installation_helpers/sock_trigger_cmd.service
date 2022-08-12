@@ -6,8 +6,7 @@ Type=simple
 Restart=always
 User=root
 Group=sock-trigger-cmd
-ExecStart=/path/to/sock_trigger_cmd /run/sock_trigger_cmd.sock /etc/sock_trigger_cmd.conf
-ExecStartPost=/usr/bin/chmod 660 /run/sock_trigger_cmd.sock
+ExecStart=/usr/local/sbin/sock_trigger_cmd /run/sock_trigger_cmd.sock /etc/sock_trigger_cmd.conf
 
 [Install]
 WantedBy=multi-user.target
