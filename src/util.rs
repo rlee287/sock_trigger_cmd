@@ -61,26 +61,7 @@ impl std::fmt::Display for TryIntoNonEmptyNoNullStringErr {
 }
 impl Error for TryIntoNonEmptyNoNullStringErr {}
 
-#[derive(Debug)]
-pub enum RunCmdError {
-    InvalidShlex, // TODO: remove
-    CmdSpawnFailure(std::io::Error)
-}
-impl std::fmt::Display for RunCmdError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            RunCmdError::InvalidShlex =>
-                f.write_str("Could not parse command"),
-            RunCmdError::CmdSpawnFailure(e) =>
-                write!(f, "Could not spawn command: {}", e),
-        }
-    }
-}
-impl Error for RunCmdError {}
-
-pub fn run_cmd(cmd_args: &Vec<String>) -> Result<Output, RunCmdError> {
-    //let cmd_args = shlex::split(cmd).ok_or(RunCmdError::InvalidShlex)?;
-
+pub fn run_cmd(cmd_args: &Vec<String>) -> Result<Output, std::io::Error> {
     let first_non_env_index = cmd_args.iter()
         .position(|s| !s.contains('=')).unwrap_or(0);
     let parsed_env_map = cmd_args[..first_non_env_index].iter()
@@ -101,5 +82,5 @@ pub fn run_cmd(cmd_args: &Vec<String>) -> Result<Output, RunCmdError> {
         .envs(parsed_env_map.chain(preserved_env_map))
         // Default of output() is null stdin and piped stdout
         .output();
-    cmd_obj.map_err(|e| RunCmdError::CmdSpawnFailure(e))
+    cmd_obj
 }
