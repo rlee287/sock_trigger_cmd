@@ -20,7 +20,7 @@ use flexi_logger::writers::{Syslog, SyslogWriter};
 mod util;
 use util::NonEmptyNoNullString;
 
-fn handle_connection(config: &HashMap<NonEmptyNoNullString, String>, stream: UnixStream) {
+fn handle_connection(config: &HashMap<NonEmptyNoNullString, Vec<String>>, stream: UnixStream) {
     debug!("Thread spawned for new connection");
     let max_key_len = config.keys().map(|s| s.as_ref().len()).max().unwrap();
     let mut socket_bytes = (&stream).bytes();
@@ -69,7 +69,7 @@ fn handle_connection(config: &HashMap<NonEmptyNoNullString, String>, stream: Uni
                                     0 => Level::Info,
                                     _ => Level::Warn
                                 };
-                                log!(finish_level, "Command {} exited with code {}", cmd, exit_code);
+                                log!(finish_level, "Command {:?} exited with code {}", cmd, exit_code);
                                 if let Err(e) = (&stream).write_all(&[b'C', (exit_code%256) as u8]) {
                                     error!("Could not write to socket: {}", e);
                                 }
@@ -79,15 +79,15 @@ fn handle_connection(config: &HashMap<NonEmptyNoNullString, String>, stream: Uni
                                 }
                             },
                             None => {
-                                warn!("Command {} terminated by signal", cmd);
+                                warn!("Command {:?} terminated by signal", cmd);
                                 if let Err(e) = (&stream).write_all(b"S") {
                                     error!("Could not write to socket: {}", e);
                                 }
                                 Level::Warn
                             }
                         };
-                        log!(log_output_level, "stdout for {}:\n{}", cmd, String::from_utf8_lossy(&output.stdout));
-                        log!(log_output_level, "stderr for {}:\n{}", cmd, String::from_utf8_lossy(&output.stderr));
+                        log!(log_output_level, "stdout for {:?}:\n{}", cmd, String::from_utf8_lossy(&output.stdout));
+                        log!(log_output_level, "stderr for {:?}:\n{}", cmd, String::from_utf8_lossy(&output.stderr));
                     },
                     Err(e) => {
                         error!("Error starting command: {}", e);
@@ -147,8 +147,32 @@ fn run() -> Result<(), String> {
         Ok(val) => val,
         Err(e) => return Err(format!("Unable to read config: {}", e))
     };
-    let config: HashMap<NonEmptyNoNullString, String> = serde_json::from_slice(&config_bytes).map_err(|e| format!("Config file must map string to string: {}", e))?;
+    let config_iter = serde_json::from_slice::<HashMap<NonEmptyNoNullString, String>>(&config_bytes)
+        .map_err(|e| format!("Config file must map string to string: {}", e))?
+        .into_iter()
+        .map(|(k, v)| {
+            let shlexed = match shlex::split(&v) {
+                Some(vec) => Ok(vec),
+                None => Err(v)
+            };
+            (k, shlexed)
+        });
     drop(config_bytes);
+
+    let config = {
+        let mut config_map = HashMap::new();
+        for (k, v) in config_iter {
+            match v {
+                Ok(vec) => {
+                    config_map.insert(k,vec);
+                }
+                Err(s) => {
+                    return Err(format!("Command {} could not be parsed", s));
+                }
+            }
+        }
+        config_map
+    };
 
     if config.is_empty() {
         return Err("Config has no entries".to_owned());

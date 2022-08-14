@@ -63,7 +63,7 @@ impl Error for TryIntoNonEmptyNoNullStringErr {}
 
 #[derive(Debug)]
 pub enum RunCmdError {
-    InvalidShlex,
+    InvalidShlex, // TODO: remove
     CmdSpawnFailure(std::io::Error)
 }
 impl std::fmt::Display for RunCmdError {
@@ -78,8 +78,8 @@ impl std::fmt::Display for RunCmdError {
 }
 impl Error for RunCmdError {}
 
-pub fn run_cmd(cmd: &str) -> Result<Output, RunCmdError> {
-    let cmd_args = shlex::split(cmd).ok_or(RunCmdError::InvalidShlex)?;
+pub fn run_cmd(cmd_args: &Vec<String>) -> Result<Output, RunCmdError> {
+    //let cmd_args = shlex::split(cmd).ok_or(RunCmdError::InvalidShlex)?;
 
     let first_non_env_index = cmd_args.iter()
         .position(|s| !s.contains('=')).unwrap_or(0);
