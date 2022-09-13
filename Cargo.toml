@@ -15,4 +15,4 @@ log = "0.4"
 shlex = "1.1.0"
 crossbeam-utils = "0.8.11"
 flexi_logger = { version = "0.23", default-features = false, features = ["syslog_writer"]}
-nix = { version = "0.24.2", default-features = false, features = ["fs", "user"] }
+nix = { version = "0.25", default-features = false, features = ["fs", "user"] }
