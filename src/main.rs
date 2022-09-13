@@ -20,6 +20,8 @@ use flexi_logger::writers::{Syslog, SyslogWriter};
 mod util;
 use util::NonEmptyNoNullString;
 
+mod run_cmd;
+
 fn handle_connection(config: &HashMap<NonEmptyNoNullString, Vec<String>>, stream: UnixStream) {
     debug!("Thread spawned for new connection");
     let max_key_len = config.keys().map(|s| s.as_ref().len()).max().unwrap();
@@ -61,7 +63,7 @@ fn handle_connection(config: &HashMap<NonEmptyNoNullString, Vec<String>>, stream
         };
         match config.get(key_str) {
             Some(cmd) => {
-                match util::run_cmd(cmd) {
+                match run_cmd::run_cmd(cmd) {
                     Ok(output) => {
                         let log_output_level = match output.status.code() {
                             Some(exit_code) => {
