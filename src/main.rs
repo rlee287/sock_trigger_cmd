@@ -6,7 +6,8 @@ use std::path::PathBuf;
 use std::io::ErrorKind;
 
 use nix::unistd::Uid;
-use nix::sys::stat::{fchmodat, Mode, FchmodatFlags};
+use nix::sys::stat::{fchmod, Mode};
+use std::os::unix::io::AsRawFd;
 
 use std::collections::HashMap;
 
@@ -202,8 +203,8 @@ fn run() -> Result<(), String> {
         }
         let socket = UnixListener::bind(&args[1])
             .map_err(|e| format!("Could not open socket: {}", e))?;
-        fchmodat(None, args[1].as_os_str(), Mode::from_bits(0o660).unwrap(), FchmodatFlags::FollowSymlink)
-        .map_err(|e| format!("Could not set socket permissions: {}", e))?;
+        fchmod(socket.as_raw_fd(),  Mode::from_bits(0o660).unwrap())
+            .map_err(|e| format!("Could not set socket permissions: {}", e))?;
 
         info!("Starting processing loop");
         let config_arc = Arc::new(config);
