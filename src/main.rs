@@ -189,18 +189,19 @@ fn run() -> Result<(), String> {
         return Err("Config has no entries".to_owned());
     }
 
+    debug!("Removing old socket file if it exists");
+    let path = PathBuf::from(&args[1]);
+    if path.exists() {
+        if path.is_file() && path.metadata().unwrap().len() > 0 {
+            return Err("Refusing to remove nonempty file at socket path".to_owned());
+        }
+        // Do this to avoid pulling in tokio::fs
+        fs::remove_file(path).unwrap();
+    }
+
     info!("Starting async runtime");
     let rt = Runtime::new().unwrap();
     rt.block_on(async {
-        debug!("Removing old socket file if it exists");
-        let path = PathBuf::from(&args[1]);
-        if path.exists() {
-            if path.is_file() && path.metadata().unwrap().len() > 0 {
-                return Err("Refusing to remove nonempty file at socket path".to_owned());
-            }
-            // Do this to avoid pulling in tokio::fs
-            rt.spawn_blocking(|| fs::remove_file(path).unwrap());
-        }
         let socket = UnixListener::bind(&args[1])
             .map_err(|e| format!("Could not open socket: {}", e))?;
         fchmod(socket.as_raw_fd(),  Mode::from_bits(0o660).unwrap())
@@ -219,6 +220,8 @@ fn run() -> Result<(), String> {
             let config_arc = config_arc.clone();
             rt.spawn(handle_connection(config_arc, stream));
         }
+        // Need unreachable return to infer async closure return type
+        Ok::<_, String>(())
     })?;
     /*thread::scope(|t| {
         for conn_result in socket.incoming() {
