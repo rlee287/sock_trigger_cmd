@@ -1,5 +1,5 @@
 #![forbid(unsafe_code)]
-use std::env::args_os;
+use argh::FromArgs;
 
 use std::fs;
 use std::path::PathBuf;
@@ -138,6 +138,21 @@ async fn handle_connection(config: impl Deref<Target=HashMap<NonEmptyNoNullStrin
     debug!("Closing connection");
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(FromArgs)]
+#[argh(description = "Start server to run commands based on keys from Unix domain socket")]
+struct CmdArgs {
+    #[argh(switch, short = 'q')]
+    #[argh(description = "do not log to stdout")]
+    no_stdout_logs: bool,
+    #[argh(positional)]
+    #[argh(description = "location to create socket at")]
+    socket_location: PathBuf,
+    #[argh(positional)]
+    #[argh(description = "location for config file")]
+    config_location: PathBuf
+}
+
 fn main() -> Result<(), String> {
     let run_result = run();
     if let Err(ref e) = run_result {
@@ -146,38 +161,39 @@ fn main() -> Result<(), String> {
     run_result
 }
 fn run() -> Result<(), String> {
-    let args: Vec<_> = args_os().collect();
-    if args.len() != 3 {
-        return Err("Usage: sock_trigger_cmd socket_loc config".to_owned());
-    }
+    let args: CmdArgs = argh::from_env();
 
     let log_path = match Uid::effective().is_root() {
         true => "/var/log/sock_trigger_cmd.log".to_owned(),
         false => std::env::var("HOME").unwrap()+"/sock_trigger_cmd.log"
     };
-    let _logger = Logger::try_with_env_or_str("debug")
-        .map_err(|e| format!("Could not initialize logging: {}", e))?
-        .o_append(true)
-        .log_to_file_and_writer(FileSpec::try_from(log_path).unwrap(),
-            SyslogWriter::try_new(flexi_logger::writers::SyslogFacility::SystemDaemons,
-                None, LevelFilter::Info,
-                "sock_trigger_cmd".to_owned(),
-                Syslog::try_datagram("/dev/log").unwrap()
-            ).unwrap()
-        )
-        .o_rotate(Some(
-            (LogCriterion::Age(LogAge::Day),
-            LogRotNaming::Timestamps,
-            LogCleanup::KeepLogFiles(7)
-            )))
-        .duplicate_to_stdout(flexi_logger::Duplicate::Info)
-        .format_for_files(flexi_logger::opt_format)
-        .format_for_stdout(flexi_logger::opt_format)
-        .start()
-        .map_err(|e| format!("Could not initialize logging: {}", e))?;
+    let _logger_handle = {
+        let mut logger = Logger::try_with_env_or_str("debug")
+            .map_err(|e| format!("Could not initialize logging: {}", e))?
+            .o_append(true)
+            .log_to_file_and_writer(FileSpec::try_from(log_path).unwrap(),
+                SyslogWriter::try_new(flexi_logger::writers::SyslogFacility::SystemDaemons,
+                    None, LevelFilter::Info,
+                    "sock_trigger_cmd".to_owned(),
+                    Syslog::try_datagram("/dev/log").unwrap()
+                ).unwrap()
+            )
+            .o_rotate(Some(
+                (LogCriterion::Age(LogAge::Day),
+                LogRotNaming::Timestamps,
+                LogCleanup::KeepLogFiles(7)
+                )))
+            .format_for_files(flexi_logger::opt_format);
+        if !args.no_stdout_logs {
+            logger = logger.duplicate_to_stdout(flexi_logger::Duplicate::Info)
+                .format_for_stdout(flexi_logger::opt_format)
+        }
+        logger.start()
+            .map_err(|e| format!("Could not initialize logging: {}", e))?
+    };
 
     info!("Loading configuration file");
-    let config_bytes = match fs::read(&args[2]) {
+    let config_bytes = match fs::read(args.config_location) {
         Ok(val) => val,
         Err(e) => return Err(format!("Unable to read config: {}", e))
     };
@@ -213,19 +229,17 @@ fn run() -> Result<(), String> {
     }
 
     debug!("Removing old socket file if it exists");
-    let path = PathBuf::from(&args[1]);
-    if path.exists() {
-        if path.is_file() && path.metadata().unwrap().len() > 0 {
+    if args.socket_location.exists() {
+        if args.socket_location.is_file() && args.socket_location.metadata().unwrap().len() > 0 {
             return Err("Refusing to remove nonempty file at socket path".to_owned());
         }
-        // Do this to avoid pulling in tokio::fs
-        fs::remove_file(path).unwrap();
+        fs::remove_file(&args.socket_location).unwrap();
     }
 
     info!("Starting async runtime");
     let rt = Runtime::new().unwrap();
     rt.block_on(async {
-        let socket = UnixListener::bind(&args[1])
+        let socket = UnixListener::bind(&args.socket_location)
             .map_err(|e| format!("Could not open socket: {}", e))?;
         fchmod(socket.as_raw_fd(),  Mode::from_bits(0o660).unwrap())
             .map_err(|e| format!("Could not set socket permissions: {}", e))?;
@@ -265,6 +279,6 @@ fn run() -> Result<(), String> {
     })?;
 
     info!("Exiting");
-    _logger.shutdown();
+    _logger_handle.shutdown();
     Ok(())
 }
