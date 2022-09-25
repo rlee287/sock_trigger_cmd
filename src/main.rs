@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 use std::env::args_os;
+use argh::FromArgs;
 
 use std::fs;
 use std::path::PathBuf;
@@ -132,6 +133,19 @@ async fn handle_connection(config: impl Deref<Target=HashMap<NonEmptyNoNullStrin
         }
     }
     debug!("Closing connection");
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(FromArgs)]
+#[argh(description = "dscr")]
+struct CmdArgs {
+    #[argh(switch, short = 'q')]
+    #[argh(description = "do not log to stdout")]
+    no_stdout: bool,
+    #[argh(positional)]
+    socket_location: PathBuf,
+    #[argh(positional)]
+    config_location: PathBuf
 }
 
 fn main() -> Result<(), String> {
