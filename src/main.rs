@@ -25,6 +25,10 @@ use std::os::unix::process::ExitStatusExt;
 use log::{debug, info, warn, error, log, Level, LevelFilter};
 use flexi_logger::{Logger, FileSpec};
 use flexi_logger::writers::{Syslog, SyslogWriter};
+use flexi_logger::Criterion as LogCriterion;
+use flexi_logger::Age as LogAge;
+use flexi_logger::Naming as LogRotNaming;
+use flexi_logger::Cleanup as LogCleanup;
 
 mod util;
 use util::NonEmptyNoNullString;
@@ -161,6 +165,11 @@ fn run() -> Result<(), String> {
                 Syslog::try_datagram("/dev/log").unwrap()
             ).unwrap()
         )
+        .o_rotate(Some(
+            (LogCriterion::Age(LogAge::Day),
+            LogRotNaming::Timestamps,
+            LogCleanup::KeepLogFiles(7)
+            )))
         .duplicate_to_stdout(flexi_logger::Duplicate::Info)
         .format_for_files(flexi_logger::opt_format)
         .format_for_stdout(flexi_logger::opt_format)
@@ -256,5 +265,6 @@ fn run() -> Result<(), String> {
     })?;
 
     info!("Exiting");
+    _logger.shutdown();
     Ok(())
 }
