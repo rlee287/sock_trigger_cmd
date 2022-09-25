@@ -3,7 +3,6 @@ use argh::FromArgs;
 
 use std::fs;
 use std::path::PathBuf;
-use std::io::ErrorKind;
 
 use nix::unistd::Uid;
 use nix::sys::stat::{fchmod, Mode};
@@ -15,7 +14,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use tokio::runtime::Runtime;
-use tokio::io::{AsyncWriteExt, AsyncReadExt};
+use tokio::io::{AsyncWriteExt, AsyncBufReadExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::select;
 use tokio::sync::mpsc::{channel, Sender};
@@ -40,43 +39,35 @@ use std::ops::Deref;
 static IS_HALTING: AtomicBool = AtomicBool::new(false);
 
 async fn handle_connection(config: impl Deref<Target=HashMap<NonEmptyNoNullString, Vec<String>>>,
-        mut stream: UnixStream, _send_token: Sender<()>) {
+        stream: UnixStream, _send_token: Sender<()>) {
     debug!("Establishing connection");
     let max_key_len = config.keys().map(|s| s.as_ref().len()).max().unwrap();
-    // TODO: add shift-reg style buffering
-    let mut socket_byte_buf: [u8; 1] = [0x00];
 
-    'cmd_loop: loop {
+    let mut stream_wrap = BufReader::new(stream);
+
+    // Null byte scanning works because UTF-8 does not have nulls
+    loop {
         let mut key_vec: Vec<u8> = Vec::with_capacity(max_key_len);
-        while key_vec.len() <= max_key_len {
-            match stream.read(&mut socket_byte_buf).await {
-                Ok(1) => {
-                    // Null byte scanning works because UTF-8 does not have nulls
-                    if socket_byte_buf[0] == b'\x00' {
-                        break;
-                    }
-                    key_vec.extend(socket_byte_buf);
-                },
-                Ok(0) => {
-                    break 'cmd_loop;
-                },
-                Ok(_) => unreachable!(),
-                Err(e) => {
-                    if e.kind() == ErrorKind::Interrupted {
-                        continue;
-                    }
-                    error!("Could not read from socket: {}", e);
-                    // Go ahead and wipe the buffer
-                    continue 'cmd_loop;
-                }
-            };
-        }
+        match stream_wrap.read_until(b'\0', &mut key_vec).await {
+            Ok(0) => {
+                break;
+            },
+            Ok(_) => {},
+            Err(e) => {
+                // No interrupted errors occur here
+                error!("Could not read from socket: {}", e);
+                // Go ahead and wipe the buffer
+                continue;
+            }
+        };
+        key_vec.pop();
+        let stream_ref = stream_wrap.get_mut();
         let key_str = match std::str::from_utf8(&key_vec) {
             Ok(s) => s,
             Err(_) => {
                 // Wouldn't match our keys anyways
                 warn!("Received non-matching key with invalid utf8 {}", String::from_utf8_lossy(&key_vec));
-                if let Err(e) = stream.write_all(b"X").await {
+                if let Err(e) = stream_ref.write_all(b"X").await {
                     error!("Could not write to socket: {}", e);
                 }
                 continue;
@@ -94,7 +85,7 @@ async fn handle_connection(config: impl Deref<Target=HashMap<NonEmptyNoNullStrin
                                 };
                                 log!(finish_level, "Command {:?} exited with code {}", cmd, exit_code);
                                 let ret_chars = [b'C', (exit_code%256) as u8];
-                                if let Err(e) = stream.write_all(&ret_chars).await {
+                                if let Err(e) = stream_ref.write_all(&ret_chars).await {
                                     error!("Could not write to socket: {}", e);
                                 }
                                 match exit_code {
@@ -106,7 +97,7 @@ async fn handle_connection(config: impl Deref<Target=HashMap<NonEmptyNoNullStrin
                                 let sig = output.status.signal().unwrap();
                                 warn!("Command {:?} terminated by signal {}", cmd, sig);
                                 let ret_chars = [b'S', (sig%256) as u8];
-                                if let Err(e) = stream.write_all(&ret_chars).await {
+                                if let Err(e) = stream_ref.write_all(&ret_chars).await {
                                     error!("Could not write to socket: {}", e);
                                 }
                                 Level::Warn
@@ -117,7 +108,7 @@ async fn handle_connection(config: impl Deref<Target=HashMap<NonEmptyNoNullStrin
                     },
                     Err(e) => {
                         error!("Error starting command: {}", e);
-                        if let Err(e) = stream.write_all(b"F").await {
+                        if let Err(e) = stream_ref.write_all(b"F").await {
                             error!("Could not write to socket: {}", e);
                         }
                     }
@@ -125,7 +116,7 @@ async fn handle_connection(config: impl Deref<Target=HashMap<NonEmptyNoNullStrin
             },
             None => {
                 warn!("Received non-matching key {}", key_str);
-                if let Err(e) = stream.write_all(b"X").await {
+                if let Err(e) = stream_ref.write_all(b"X").await {
                     error!("Could not write to socket: {}", e);
                 }
                 continue;
