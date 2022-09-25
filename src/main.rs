@@ -12,10 +12,15 @@ use std::os::unix::io::AsRawFd;
 use std::collections::HashMap;
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use tokio::runtime::Runtime;
 use tokio::io::{AsyncWriteExt, AsyncReadExt};
 use tokio::net::{UnixListener, UnixStream};
+use tokio::select;
+use tokio::sync::mpsc::{channel, Sender};
+
+use std::os::unix::process::ExitStatusExt;
 
 use log::{debug, info, warn, error, log, Level, LevelFilter};
 use flexi_logger::{Logger, FileSpec};
@@ -28,7 +33,10 @@ mod run_cmd;
 
 use std::ops::Deref;
 
-async fn handle_connection(config: impl Deref<Target=HashMap<NonEmptyNoNullString, Vec<String>>>, mut stream: UnixStream) {
+static IS_HALTING: AtomicBool = AtomicBool::new(false);
+
+async fn handle_connection(config: impl Deref<Target=HashMap<NonEmptyNoNullString, Vec<String>>>,
+        mut stream: UnixStream, _send_token: Sender<()>) {
     debug!("Establishing connection");
     let max_key_len = config.keys().map(|s| s.as_ref().len()).max().unwrap();
     // TODO: add shift-reg style buffering
@@ -81,7 +89,8 @@ async fn handle_connection(config: impl Deref<Target=HashMap<NonEmptyNoNullStrin
                                     _ => Level::Warn
                                 };
                                 log!(finish_level, "Command {:?} exited with code {}", cmd, exit_code);
-                                if let Err(e) = stream.write_all(&[b'C', (exit_code%256) as u8]).await {
+                                let ret_chars = [b'C', (exit_code%256) as u8];
+                                if let Err(e) = stream.write_all(&ret_chars).await {
                                     error!("Could not write to socket: {}", e);
                                 }
                                 match exit_code {
@@ -90,8 +99,10 @@ async fn handle_connection(config: impl Deref<Target=HashMap<NonEmptyNoNullStrin
                                 }
                             },
                             None => {
-                                warn!("Command {:?} terminated by signal", cmd);
-                                if let Err(e) = stream.write_all(b"S").await {
+                                let sig = output.status.signal().unwrap();
+                                warn!("Command {:?} terminated by signal {}", cmd, sig);
+                                let ret_chars = [b'S', (sig%256) as u8];
+                                if let Err(e) = stream.write_all(&ret_chars).await {
                                     error!("Could not write to socket: {}", e);
                                 }
                                 Level::Warn
@@ -115,6 +126,9 @@ async fn handle_connection(config: impl Deref<Target=HashMap<NonEmptyNoNullStrin
                 }
                 continue;
             }
+        }
+        if IS_HALTING.load(Ordering::Acquire) {
+            break;
         }
     }
     debug!("Closing connection");
@@ -209,33 +223,38 @@ fn run() -> Result<(), String> {
 
         info!("Starting processing loop");
         let config_arc = Arc::new(config);
+        let (send, mut recv) = channel(1);
         loop {
-            let stream = match socket.accept().await {
-                Ok((stream, _)) => stream,
-                Err(e) => {
-                    warn!("Error with receiving connection: {}", e);
-                    continue;
+            select! {
+                ctrl_c_res = tokio::signal::ctrl_c() => match ctrl_c_res {
+                    Ok(()) => {
+                        info!("Received Ctrl-C, finishing current tasks");
+                        IS_HALTING.store(true, Ordering::Release);
+                        break;
+                    },
+                    Err(e) => {
+                        return Err(format!("Could not handle Ctrl-C: {}", e));
+                    }
+                },
+                stream_res = socket.accept() => {
+                    let stream = match stream_res {
+                        Ok((stream, _)) => stream,
+                        Err(e) => {
+                            warn!("Error with receiving connection: {}", e);
+                            continue;
+                        }
+                    };
+                    let config_arc = config_arc.clone();
+                    rt.spawn(handle_connection(config_arc, stream, send.clone()));
                 }
             };
-            let config_arc = config_arc.clone();
-            rt.spawn(handle_connection(config_arc, stream));
         }
-        // Need unreachable return to infer async closure return type
+        drop(send);
+        let _ = recv.recv().await;
+
         Ok::<_, String>(())
     })?;
-    /*thread::scope(|t| {
-        for conn_result in socket.incoming() {
-            match conn_result {
-                Ok(conn) => {
-                    t.spawn(|_| handle_connection(&config, conn));
-                },
-                Err(e) => {
-                    debug!("Error with receiving connection: {}", e);
-                    break;
-                }
-            }
-        }
-    }).unwrap();*/
 
+    info!("Exiting");
     Ok(())
 }

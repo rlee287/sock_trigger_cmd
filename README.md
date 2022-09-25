@@ -7,3 +7,4 @@ Commands are run directly (i.e. without a shell environment) and only have acces
 The socket returns the following information for each command executed:
  - "C" if the command ran to completion, "S" if the command was terminated by a signal, "F" if the command could not be spawned, and "X" for a non-matching key
  - A single `u8` containing the exit code, if the previous byte was a "C"
+ - A single `u8` containing the signal number, if the previous byte was a "S"

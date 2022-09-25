@@ -15,4 +15,6 @@ flexi_logger = { version = "0.23", default-features = false, features = ["syslog
 shlex = "1.1.0"
 nix = { version = "0.25", default-features = false, features = ["fs", "user"] }
 
-tokio = { version = "1.21.1", features = ["rt-multi-thread", "net", "io-util", "process"] }
+[dependencies.tokio]
+version = "1.21.1"
+features = ["rt-multi-thread", "net", "io-util", "process", "sync", "signal", "macros"]
