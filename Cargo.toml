@@ -1,6 +1,6 @@
 [package]
 name = "sock_trigger_cmd"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -10,9 +10,11 @@ serde = {version = "1.0", features = ["derive"]}
 serde_json = "1.0"
 
 log = "0.4"
-#simplelog = {version = "0.12", default-features = false}
+flexi_logger = { version = "0.23", default-features = false, features = ["syslog_writer"]}
 
 shlex = "1.1.0"
-crossbeam-utils = "0.8.11"
-flexi_logger = { version = "0.23", default-features = false, features = ["syslog_writer"]}
 nix = { version = "0.25", default-features = false, features = ["fs", "user"] }
+
+[dependencies.tokio]
+version = "1.21.1"
+features = ["rt-multi-thread", "net", "io-util", "process", "sync", "signal", "macros"]

@@ -3,15 +3,24 @@ use std::env::args_os;
 
 use std::fs;
 use std::path::PathBuf;
-use std::io::{Read, Write, ErrorKind};
-use std::os::unix::net::{UnixListener, UnixStream};
+use std::io::ErrorKind;
 
 use nix::unistd::Uid;
-use nix::sys::stat::{fchmodat, Mode, FchmodatFlags};
+use nix::sys::stat::{fchmod, Mode};
+use std::os::unix::io::AsRawFd;
 
 use std::collections::HashMap;
 
-use crossbeam_utils::thread;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use tokio::runtime::Runtime;
+use tokio::io::{AsyncWriteExt, AsyncReadExt};
+use tokio::net::{UnixListener, UnixStream};
+use tokio::select;
+use tokio::sync::mpsc::{channel, Sender};
+
+use std::os::unix::process::ExitStatusExt;
 
 use log::{debug, info, warn, error, log, Level, LevelFilter};
 use flexi_logger::{Logger, FileSpec};
@@ -22,17 +31,33 @@ use util::NonEmptyNoNullString;
 
 mod run_cmd;
 
-fn handle_connection(config: &HashMap<NonEmptyNoNullString, Vec<String>>, stream: UnixStream) {
-    debug!("Thread spawned for new connection");
+use std::ops::Deref;
+
+static IS_HALTING: AtomicBool = AtomicBool::new(false);
+
+async fn handle_connection(config: impl Deref<Target=HashMap<NonEmptyNoNullString, Vec<String>>>,
+        mut stream: UnixStream, _send_token: Sender<()>) {
+    debug!("Establishing connection");
     let max_key_len = config.keys().map(|s| s.as_ref().len()).max().unwrap();
-    let mut socket_bytes = (&stream).bytes();
+    // TODO: add shift-reg style buffering
+    let mut socket_byte_buf: [u8; 1] = [0x00];
 
     'cmd_loop: loop {
         let mut key_vec: Vec<u8> = Vec::with_capacity(max_key_len);
         while key_vec.len() <= max_key_len {
-            let next_byte = match socket_bytes.next() {
-                Some(Ok(b)) => b,
-                Some(Err(e)) => {
+            match stream.read(&mut socket_byte_buf).await {
+                Ok(1) => {
+                    // Null byte scanning works because UTF-8 does not have nulls
+                    if socket_byte_buf[0] == b'\x00' {
+                        break;
+                    }
+                    key_vec.extend(socket_byte_buf);
+                },
+                Ok(0) => {
+                    break 'cmd_loop;
+                },
+                Ok(_) => unreachable!(),
+                Err(e) => {
                     if e.kind() == ErrorKind::Interrupted {
                         continue;
                     }
@@ -40,22 +65,14 @@ fn handle_connection(config: &HashMap<NonEmptyNoNullString, Vec<String>>, stream
                     // Go ahead and wipe the buffer
                     continue 'cmd_loop;
                 }
-                None => {
-                    break 'cmd_loop;
-                }
             };
-            // Null byte scanning works because UTF-8 does not have nulls
-            if next_byte == b'\x00' {
-                break;
-            }
-            key_vec.push(next_byte);
         }
         let key_str = match std::str::from_utf8(&key_vec) {
             Ok(s) => s,
             Err(_) => {
                 // Wouldn't match our keys anyways
                 warn!("Received non-matching key with invalid utf8 {}", String::from_utf8_lossy(&key_vec));
-                if let Err(e) = (&stream).write_all(b"X") {
+                if let Err(e) = stream.write_all(b"X").await {
                     error!("Could not write to socket: {}", e);
                 }
                 continue;
@@ -63,7 +80,7 @@ fn handle_connection(config: &HashMap<NonEmptyNoNullString, Vec<String>>, stream
         };
         match config.get(key_str) {
             Some(cmd) => {
-                match run_cmd::run_cmd(cmd) {
+                match run_cmd::run_cmd(cmd).await {
                     Ok(output) => {
                         let log_output_level = match output.status.code() {
                             Some(exit_code) => {
@@ -72,7 +89,8 @@ fn handle_connection(config: &HashMap<NonEmptyNoNullString, Vec<String>>, stream
                                     _ => Level::Warn
                                 };
                                 log!(finish_level, "Command {:?} exited with code {}", cmd, exit_code);
-                                if let Err(e) = (&stream).write_all(&[b'C', (exit_code%256) as u8]) {
+                                let ret_chars = [b'C', (exit_code%256) as u8];
+                                if let Err(e) = stream.write_all(&ret_chars).await {
                                     error!("Could not write to socket: {}", e);
                                 }
                                 match exit_code {
@@ -81,8 +99,10 @@ fn handle_connection(config: &HashMap<NonEmptyNoNullString, Vec<String>>, stream
                                 }
                             },
                             None => {
-                                warn!("Command {:?} terminated by signal", cmd);
-                                if let Err(e) = (&stream).write_all(b"S") {
+                                let sig = output.status.signal().unwrap();
+                                warn!("Command {:?} terminated by signal {}", cmd, sig);
+                                let ret_chars = [b'S', (sig%256) as u8];
+                                if let Err(e) = stream.write_all(&ret_chars).await {
                                     error!("Could not write to socket: {}", e);
                                 }
                                 Level::Warn
@@ -93,7 +113,7 @@ fn handle_connection(config: &HashMap<NonEmptyNoNullString, Vec<String>>, stream
                     },
                     Err(e) => {
                         error!("Error starting command: {}", e);
-                        if let Err(e) = (&stream).write_all(b"F") {
+                        if let Err(e) = stream.write_all(b"F").await {
                             error!("Could not write to socket: {}", e);
                         }
                     }
@@ -101,14 +121,17 @@ fn handle_connection(config: &HashMap<NonEmptyNoNullString, Vec<String>>, stream
             },
             None => {
                 warn!("Received non-matching key {}", key_str);
-                if let Err(e) = (&stream).write_all(b"X") {
+                if let Err(e) = stream.write_all(b"X").await {
                     error!("Could not write to socket: {}", e);
                 }
                 continue;
             }
         }
+        if IS_HALTING.load(Ordering::Acquire) {
+            break;
+        }
     }
-    debug!("Thread exiting")
+    debug!("Closing connection");
 }
 
 fn main() -> Result<(), String> {
@@ -186,30 +209,52 @@ fn run() -> Result<(), String> {
         if path.is_file() && path.metadata().unwrap().len() > 0 {
             return Err("Refusing to remove nonempty file at socket path".to_owned());
         }
+        // Do this to avoid pulling in tokio::fs
         fs::remove_file(path).unwrap();
     }
 
-    info!("Opening socket");
-    // TODO: allow for a regular TCP socket read as well
-    let socket = UnixListener::bind(&args[1])
-        .map_err(|e| format!("Could not open socket: {}", e))?;
-    fchmodat(None, args[1].as_os_str(), Mode::from_bits(0o660).unwrap(), FchmodatFlags::FollowSymlink)
-        .map_err(|e| format!("Could not set socket permissions: {}", e))?;
+    info!("Starting async runtime");
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let socket = UnixListener::bind(&args[1])
+            .map_err(|e| format!("Could not open socket: {}", e))?;
+        fchmod(socket.as_raw_fd(),  Mode::from_bits(0o660).unwrap())
+            .map_err(|e| format!("Could not set socket permissions: {}", e))?;
 
-    info!("Starting processing loop");
-    thread::scope(|t| {
-        for conn_result in socket.incoming() {
-            match conn_result {
-                Ok(conn) => {
-                    t.spawn(|_| handle_connection(&config, conn));
+        info!("Starting processing loop");
+        let config_arc = Arc::new(config);
+        let (send, mut recv) = channel(1);
+        loop {
+            select! {
+                ctrl_c_res = tokio::signal::ctrl_c() => match ctrl_c_res {
+                    Ok(()) => {
+                        info!("Received Ctrl-C, finishing current tasks");
+                        IS_HALTING.store(true, Ordering::Release);
+                        break;
+                    },
+                    Err(e) => {
+                        return Err(format!("Could not handle Ctrl-C: {}", e));
+                    }
                 },
-                Err(e) => {
-                    debug!("Error with receiving connection: {}", e);
-                    break;
+                stream_res = socket.accept() => {
+                    let stream = match stream_res {
+                        Ok((stream, _)) => stream,
+                        Err(e) => {
+                            warn!("Error with receiving connection: {}", e);
+                            continue;
+                        }
+                    };
+                    let config_arc = config_arc.clone();
+                    rt.spawn(handle_connection(config_arc, stream, send.clone()));
                 }
-            }
+            };
         }
-    }).unwrap();
+        drop(send);
+        let _ = recv.recv().await;
 
+        Ok::<_, String>(())
+    })?;
+
+    info!("Exiting");
     Ok(())
 }

@@ -1,7 +1,9 @@
-use std::process::{Command, Output};
+use tokio::process::Command;
+use std::process::Output;
+
 use std::ffi::{OsStr, OsString};
 
-pub fn run_cmd(cmd_args: &Vec<String>) -> Result<Output, std::io::Error> {
+pub async fn run_cmd(cmd_args: &Vec<String>) -> Result<Output, std::io::Error> {
     let first_non_env_index = cmd_args.iter()
         .position(|s| !s.contains('=')).unwrap_or(0);
     let parsed_env_map = cmd_args[..first_non_env_index].iter()
@@ -21,6 +23,7 @@ pub fn run_cmd(cmd_args: &Vec<String>) -> Result<Output, std::io::Error> {
         .env_clear()
         .envs(parsed_env_map.chain(preserved_env_map))
         // Default of output() is null stdin and piped stdout
-        .output();
+        .output()
+        .await;
     cmd_obj
 }
