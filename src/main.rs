@@ -188,32 +188,17 @@ fn run() -> Result<(), String> {
         Ok(val) => val,
         Err(e) => return Err(format!("Unable to read config: {}", e))
     };
-    let config_iter = serde_json::from_slice::<HashMap<NonEmptyNoNullString, String>>(&config_bytes)
+    let config = serde_json::from_slice::<HashMap<NonEmptyNoNullString, String>>(&config_bytes)
         .map_err(|e| format!("Config file must map string to string: {}", e))?
         .into_iter()
         .map(|(k, v)| {
-            let shlexed = match shlex::split(&v) {
-                Some(vec) => Ok(vec),
-                None => Err(v)
-            };
-            (k, shlexed)
-        });
-    drop(config_bytes);
-
-    let config = {
-        let mut config_map = HashMap::new();
-        for (k, v) in config_iter {
-            match v {
-                Ok(vec) => {
-                    config_map.insert(k,vec);
-                }
-                Err(s) => {
-                    return Err(format!("Command {} could not be parsed", s));
-                }
+            match shlex::split(&v) {
+                Some(vec) => Ok((k, vec)),
+                None => Err(format!("Command {} could not be shlexed", v))
             }
-        }
-        config_map
-    };
+        })
+        .collect::<Result<HashMap<_,_>,_>>()?;
+    drop(config_bytes);
 
     if config.is_empty() {
         return Err("Config has no entries".to_owned());
