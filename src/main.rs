@@ -19,6 +19,7 @@ use tokio::select;
 use tokio::sync::mpsc::{channel, Sender};
 
 use std::os::unix::process::ExitStatusExt;
+use std::os::unix::fs::FileTypeExt;
 
 use log::{debug, info, warn, error, log, Level, LevelFilter};
 use flexi_logger::{Logger, FileSpec};
@@ -205,10 +206,13 @@ fn run() -> Result<(), String> {
 
     debug!("Removing old socket file if it exists");
     if args.socket_location.exists() {
-        if args.socket_location.is_file() && args.socket_location.metadata().unwrap().len() > 0 {
-            return Err("Refusing to remove nonempty file at socket path".to_owned());
+        let sock_metadata = args.socket_location.metadata().unwrap();
+        // Can delete if socket or empty file
+        if sock_metadata.file_type().is_socket() || (sock_metadata.is_file() && sock_metadata.len() == 0) {
+            fs::remove_file(&args.socket_location).unwrap();
+        } else {
+            return Err(format!("{} already exists and cannot be removed", args.socket_location.display()));
         }
-        fs::remove_file(&args.socket_location).unwrap();
     }
 
     info!("Starting async runtime");
