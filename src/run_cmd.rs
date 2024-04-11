@@ -22,7 +22,8 @@ pub async fn run_cmd(cmd_args: &Vec<String>) -> Result<Output, std::io::Error> {
     let cmd_obj = Command::new(&cmd_args[first_non_env_index])
         .args(&cmd_args[first_non_env_index+1..])
         .env_clear()
-        .envs(parsed_env_map.chain(preserved_env_map))
+        // Chain parsed second so that it can override the preserved env vars
+        .envs(preserved_env_map.chain(parsed_env_map))
         // Default of output() is null stdin and piped stdout
         .output()
         .await;
