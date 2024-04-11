@@ -2,6 +2,7 @@ use serde::Deserialize;
 use std::error::Error;
 use std::borrow::Borrow;
 
+/// A string that is nonempty and has no null bytes
 #[derive(Deserialize)]
 #[serde(try_from = "String")]
 #[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
@@ -28,9 +29,13 @@ impl PartialEq<str> for NonEmptyNoNullString {
         self.inner == other
     }
 }
+
+/// The error returned when an empty or null-containing string is passed
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
 pub enum TryIntoNonEmptyNoNullStringErr {
+    /// The passed string is empty
     Empty,
+    /// The passed string has a null byte at the given location
     HasNull(usize)
 }
 impl TryFrom<String> for NonEmptyNoNullString {

@@ -3,6 +3,7 @@ use std::process::Output;
 
 use std::ffi::{OsStr, OsString};
 
+/// Runs the tokenized passed-in command, separating out env vars first
 pub async fn run_cmd(cmd_args: &Vec<String>) -> Result<Output, std::io::Error> {
     let first_non_env_index = cmd_args.iter()
         .position(|s| !s.contains('=')).unwrap_or(0);
