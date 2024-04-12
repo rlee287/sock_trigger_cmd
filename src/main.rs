@@ -75,6 +75,7 @@ async fn handle_connection(config: impl Deref<Target=HashMap<NonEmptyNoNullStrin
         };
         match config.get(key_str) {
             Some(cmd) => {
+                info!("Received matching key {}", key_str);
                 match run_cmd::run_cmd(cmd).await {
                     Ok(output) => {
                         let log_output_level = match output.status.code() {
@@ -94,6 +95,7 @@ async fn handle_connection(config: impl Deref<Target=HashMap<NonEmptyNoNullStrin
                                 }
                             },
                             None => {
+                                // Unwrap works because process was terminated by signal by this point
                                 let sig = output.status.signal().unwrap();
                                 warn!("Command {:?} terminated by signal {}", cmd, sig);
                                 let ret_chars = [b'S', (sig%256) as u8];
@@ -162,12 +164,13 @@ fn run() -> Result<(), String> {
         let mut logger = Logger::try_with_env_or_str("debug")
             .map_err(|e| format!("Could not initialize logging: {}", e))?
             .o_append(true)
-            .log_to_file_and_writer(FileSpec::try_from(log_path).unwrap(),
+            .log_to_file_and_writer(FileSpec::try_from(log_path)
+                    .map_err(|_| "Could not open log file for logging".to_owned())?,
                 SyslogWriter::try_new(flexi_logger::writers::SyslogFacility::SystemDaemons,
                     None, LevelFilter::Info,
                     "sock_trigger_cmd".to_owned(),
-                    Syslog::try_datagram("/dev/log").unwrap()
-                ).unwrap()
+                    Syslog::try_datagram("/dev/log").map_err(|_| "Could not open syslog for logging".to_owned())?
+                ).expect("Failed to set up SyslogWriter")
             )
             .o_rotate(Some(
                 (LogCriterion::Age(LogAge::Day),
@@ -208,15 +211,20 @@ fn run() -> Result<(), String> {
     if args.socket_location.exists() {
         let sock_metadata = args.socket_location.metadata().unwrap();
         // Can delete if socket or empty file
+        let mut no_longer_exists = true;
         if sock_metadata.file_type().is_socket() || (sock_metadata.is_file() && sock_metadata.len() == 0) {
-            fs::remove_file(&args.socket_location).unwrap();
-        } else {
+            no_longer_exists = fs::remove_file(&args.socket_location).is_ok();
+        } else if sock_metadata.is_dir() {
+            // Try to remove empty directory; will fail if not empty
+            no_longer_exists = fs::remove_dir(&args.socket_location).is_ok();
+        }
+        if !no_longer_exists {
             return Err(format!("{} already exists and cannot be removed", args.socket_location.display()));
         }
     }
 
     info!("Starting async runtime");
-    let rt = Runtime::new().unwrap();
+    let rt = Runtime::new().expect("Failed to start async runtime");
     rt.block_on(async {
         let socket = UnixListener::bind(&args.socket_location)
             .map_err(|e| format!("Could not open socket: {}", e))?;
